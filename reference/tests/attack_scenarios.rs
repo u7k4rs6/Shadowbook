@@ -320,6 +320,87 @@ fn clone_is_total_and_independent() {
     assert!(book.is_live(2), "mutating a clone leaked back into the original");
 }
 
+/// Session 1.5 audit: kind stickiness under amend. A resting order
+/// remembers its own kind (`Order::kind`), independent of the Amend
+/// command, which carries no kind at all. The same repricing amend must
+/// diverge in outcome depending only on that remembered kind: a resting
+/// Limit that gets amended into a cross matches against the book; a
+/// resting PostOnly amended the same way rejects and is left untouched.
+#[test]
+fn amend_kind_stickiness_limit_matches_postonly_rejects() {
+    // Limit case: resting bid at 90 does not cross the ask at 100. Amend
+    // it up to 105 and it must now cross and fill.
+    let mut limit_book = RefBook::new(wide_cfg());
+    limit_book.apply(new_cmd(1, 1, Side::Sell, Kind::Limit, 100, 10));
+    limit_book.apply(new_cmd(2, 2, Side::Buy, Kind::Limit, 90, 5));
+
+    let events = limit_book.apply(Command::Amend { id: 2, new_price: 105, new_qty: 5 });
+    assert!(
+        events.iter().any(|e| matches!(e, Event::Fill { maker: 1, taker: 2, qty: 5, price: 100 })),
+        "amended Limit should have crossed and filled at the maker's price: {events:#?}"
+    );
+    assert_no_violations(&limit_book);
+
+    // PostOnly case: identical setup and identical price move, but the
+    // resting order is PostOnly. The amend must reject with WouldCross
+    // and leave the order exactly where it was.
+    let mut post_only_book = RefBook::new(wide_cfg());
+    post_only_book.apply(new_cmd(1, 1, Side::Sell, Kind::Limit, 100, 10));
+    post_only_book.apply(new_cmd(2, 2, Side::Buy, Kind::PostOnly, 90, 5));
+
+    let events = post_only_book.apply(Command::Amend { id: 2, new_price: 105, new_qty: 5 });
+    assert_eq!(rejected_reason(&events, 2), Some(RejectReason::WouldCross), "{events:#?}");
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Fill { .. } | Event::Amended { .. })),
+        "a rejected amend must not fill or report Amended: {events:#?}"
+    );
+    assert!(post_only_book.is_live(2), "rejected amend must leave the resting order live and untouched");
+    assert_eq!(post_only_book.best_bid(), Some(90), "rejected amend must not move the resting price");
+    assert_no_violations(&post_only_book);
+}
+
+/// Session 1.5 audit: I9, replay exactness. A fresh engine fed the exact
+/// command log, including a rejected New, a decreasing amend, a sweep
+/// that empties the book and triggers a Market Cancelled, and a rejected
+/// Cancel of an unknown id, must reach a byte-identical digest. This is
+/// `RefBook::replay_matches`'s only test; before this it existed as a
+/// method with no caller anywhere in the test suite.
+#[test]
+fn i9_replay_matches_after_mixed_command_log() {
+    let mut book = RefBook::new(wide_cfg());
+    book.apply(new_cmd(1, 1, Side::Sell, Kind::Limit, 100, 10));
+    book.apply(new_cmd(2, 2, Side::Buy, Kind::Limit, 100, 4)); // partial fill, id 1 rests at 6
+    book.apply(Command::Amend { id: 1, new_price: 100, new_qty: 3 }); // decrease, keeps priority
+    book.apply(new_cmd(3, 3, Side::Buy, Kind::Market, 0, 100)); // sweeps id 1, then Cancelled
+    book.apply(Command::Cancel { id: 999 }); // UnknownOrder, still consumes a seq
+    book.apply(new_cmd(4, 1, Side::Buy, Kind::Limit, 50, 5)); // fresh resting order
+
+    assert!(book.replay_matches(), "fresh engine fed the same command log must reach a byte-identical digest");
+    assert_no_violations(&book);
+}
+
+/// Session 1.5 audit: qty == 0 rejects as InvalidQuantity, both on New
+/// and on Amend, and a rejected Amend leaves the resting order live and
+/// unchanged. The reject paths existed in code with no test exercising
+/// either of them.
+#[test]
+fn new_and_amend_reject_zero_quantity() {
+    let mut book = RefBook::new(wide_cfg());
+
+    let new_zero = book.apply(new_cmd(1, 1, Side::Buy, Kind::Limit, 100, 0));
+    assert_eq!(rejected_reason(&new_zero, 1), Some(RejectReason::InvalidQuantity), "{new_zero:?}");
+    assert!(!book.is_live(1));
+
+    book.apply(new_cmd(2, 1, Side::Buy, Kind::Limit, 100, 5));
+    assert!(book.is_live(2));
+
+    let amend_zero = book.apply(Command::Amend { id: 2, new_price: 100, new_qty: 0 });
+    assert_eq!(rejected_reason(&amend_zero, 2), Some(RejectReason::InvalidQuantity), "{amend_zero:?}");
+    assert!(book.is_live(2), "rejected amend must leave the resting order live");
+
+    assert_no_violations(&book);
+}
+
 /// Task 4: amend's `new_qty` is the new REMAINING quantity, compared
 /// against current remaining -- not the new total compared against the
 /// original qty. Tests both directions of the priority asymmetry against
