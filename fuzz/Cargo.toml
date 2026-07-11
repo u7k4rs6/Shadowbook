@@ -1,0 +1,10 @@
+[package]
+name = "fuzz"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+types = { path = "../types" }
+reference = { path = "../reference" }
+engine = { path = "../engine" }

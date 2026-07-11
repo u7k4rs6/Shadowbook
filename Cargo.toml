@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = [
+    "types",
+    "reference",
+    "engine",
+    "fuzz",
+]
+
+[workspace.package]
+edition = "2021"
