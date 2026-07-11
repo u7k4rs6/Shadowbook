@@ -5,6 +5,7 @@ members = [
     "reference",
     "engine",
     "fuzz",
+    "benches",
 ]
 
 [workspace.package]

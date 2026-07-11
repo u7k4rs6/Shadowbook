@@ -1,0 +1,15 @@
+[package]
+name = "benches"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+types = { path = "../types" }
+engine = { path = "../engine" }
+hdrhistogram = "7"
+criterion = "0.5"
+
+[[bench]]
+name = "matching"
+harness = false
