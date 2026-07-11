@@ -9,6 +9,8 @@
 //!
 //! Usage: `seeded_runner <seed> <operations>`
 
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::time::Instant;
 

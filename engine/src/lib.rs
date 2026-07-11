@@ -26,13 +26,12 @@ pub fn notional(price: Price, qty: Qty) -> i128 {
     (price as i128) * (qty as i128)
 }
 
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use arena::{Handle, OrderArena, OrderNode};
 use levels::Levels;
-use types::{AccountId, Command, Config, Event, Kind, OrderId, Price, Qty, RejectReason, RetirementRing, Seq, Side};
+use types::{AccountId, Command, Config, Event, FixedIdMap, Kind, OrderId, Price, Qty, RejectReason, RetirementRing, Seq, Side};
 
 /// Push `handle` (already carrying valid `id`/`side`/`price`/etc, with
 /// `prev`/`next` not yet meaningful) to the back of `tick`'s intrusive
@@ -97,7 +96,12 @@ pub struct Book {
     arena: OrderArena,
     bids: Levels,
     asks: Levels,
-    live: HashMap<OrderId, Handle>,
+    /// `FixedIdMap`, not `std::collections::HashMap`: a `HashMap`
+    /// reserved to `capacity` up front still grows its own table under
+    /// sustained insert/remove churn held near that capacity, the same
+    /// hashbrown tombstone-accounting mechanism `RetirementRing` was
+    /// fixed for first. See `types::FixedIdMap`'s doc comment.
+    live: FixedIdMap<Handle>,
     retirement: RetirementRing,
     next_seq: Seq,
     /// Preallocated at `new`, cleared (not deallocated) at the start of
@@ -119,7 +123,7 @@ impl Book {
             arena: OrderArena::new(cfg.capacity),
             bids: Levels::new(cfg.n_ticks),
             asks: Levels::new(cfg.n_ticks),
-            live: HashMap::with_capacity(cfg.capacity),
+            live: FixedIdMap::with_capacity(cfg.capacity),
             retirement: RetirementRing::new(cfg.id_retirement_window),
             next_seq: 0,
             event_buf: Vec::with_capacity(cfg.capacity * 2 + 8),
@@ -139,7 +143,7 @@ impl Book {
     }
 
     pub fn is_live(&self, id: OrderId) -> bool {
-        self.live.contains_key(&id)
+        self.live.contains_key(id)
     }
 
     pub fn live_count(&self) -> usize {
@@ -209,7 +213,7 @@ impl Book {
             self.push_event(Event::Rejected { id, reason: RejectReason::InvalidQuantity, seq });
             return;
         }
-        if self.live.contains_key(&id) {
+        if self.live.contains_key(id) {
             self.push_event(Event::Rejected { id, reason: RejectReason::DuplicateId, seq });
             return;
         }
@@ -270,6 +274,16 @@ impl Book {
         }
     }
 
+    /// Deliberately account-blind: post-only rejects on ANY cross,
+    /// including a cross whose only counterparty is the same account's
+    /// own resting order. This is not an oversight and there is no
+    /// self-match carve-out to add. Rejection is the conservative choice
+    /// for post-only specifically (it exists to guarantee an order never
+    /// becomes a taker, full stop), unlike a resting Limit order crossed
+    /// by an amend, which is allowed to take and has its self-match
+    /// handled by CancelResting instead (see `handle_amend`). Those are
+    /// two different kinds with two different, both intentional,
+    /// self-match policies, not one inconsistent answer to one question.
     fn would_cross(&self, side: Side, price: Price) -> bool {
         match side {
             Side::Buy => self.asks.lowest_occupied().is_some_and(|t| (t as Price) <= price),
@@ -397,7 +411,7 @@ impl Book {
                     Side::Sell => pop_front(&mut self.arena, &mut self.asks, tick),
                 };
                 self.arena.free(front_handle);
-                self.live.remove(&id);
+                self.live.remove(id);
                 self.retirement.retire(id);
                 self.push_event(Event::Cancelled { id });
                 continue;
@@ -427,7 +441,7 @@ impl Book {
                     Side::Sell => pop_front(&mut self.arena, &mut self.asks, tick),
                 };
                 self.arena.free(front_handle);
-                self.live.remove(&maker_id);
+                self.live.remove(maker_id);
                 self.retirement.retire(maker_id);
             }
         }
@@ -438,7 +452,7 @@ impl Book {
     // ---- Cancel -----------------------------------------------------------
 
     fn handle_cancel(&mut self, seq: Seq, id: OrderId) {
-        let Some(&handle) = self.live.get(&id) else {
+        let Some(&handle) = self.live.get(id) else {
             self.push_event(Event::Rejected { id, reason: RejectReason::UnknownOrder, seq });
             return;
         };
@@ -450,7 +464,7 @@ impl Book {
             Side::Sell => unlink(&mut self.arena, &mut self.asks, tick, handle),
         }
         self.arena.free(handle);
-        self.live.remove(&id);
+        self.live.remove(id);
         self.retirement.retire(id);
         self.push_event(Event::Cancelled { id });
     }
@@ -458,7 +472,7 @@ impl Book {
     // ---- Amend --------------------------------------------------------------
 
     fn handle_amend(&mut self, seq: Seq, id: OrderId, new_price: Price, new_qty: Qty) {
-        let Some(&handle) = self.live.get(&id) else {
+        let Some(&handle) = self.live.get(id) else {
             self.push_event(Event::Rejected { id, reason: RejectReason::UnknownOrder, seq });
             return;
         };
@@ -508,7 +522,7 @@ impl Book {
             Side::Buy => unlink(&mut self.arena, &mut self.bids, old_tick, handle),
             Side::Sell => unlink(&mut self.arena, &mut self.asks, old_tick, handle),
         }
-        self.live.remove(&id);
+        self.live.remove(id);
 
         {
             let node = self.arena.get_mut(handle);
@@ -580,7 +594,7 @@ mod tests {
         let mut book = Book::new(test_cfg());
 
         book.apply(Command::New { id: 1, account: 1, side: Side::Buy, kind: Kind::Limit, price: 100, qty: 1 });
-        let stale_handle = *book.live.get(&1).expect("order 1 should be live and resting");
+        let stale_handle = *book.live.get(1).expect("order 1 should be live and resting");
 
         // Cancel through the real, correct, unmutated code path: this
         // frees the slot and removes id 1 from `live`, exactly as a

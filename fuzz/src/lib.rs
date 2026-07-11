@@ -4,6 +4,8 @@
 //! (`generator`), because it is not a model at all -- it is a query
 //! against a real, correctly-behaving `reference::RefBook`.
 
+#![forbid(unsafe_code)]
+
 mod generator;
 mod harness;
 

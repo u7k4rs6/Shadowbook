@@ -28,10 +28,16 @@ pub enum Failure {
     /// which the differential comparison above can never see.
     FastInvariant { index: usize, cmd: Command, violations: Vec<String> },
     SlowInvariant { index: usize, cmd: Command, violations: Vec<String> },
-    /// I2/I3/I4, checked against each engine's own emitted event stream
-    /// independently via `types::EventAuditor`.
+    /// I3/I4 and the overfill check, checked against each engine's own
+    /// emitted event stream independently via `types::EventAuditor`.
     FastAuditor { index: usize, cmd: Command, violations: Vec<String> },
     SlowAuditor { index: usize, cmd: Command, violations: Vec<String> },
+    /// I2: buy-side and sell-side filled quantity must be equal, checked
+    /// after every command, not only at the end of a run. Previously
+    /// tracked by the auditor but never actually compared here; nothing
+    /// asserted the two running totals agreed with each other.
+    FastConservation { index: usize, cmd: Command, buy_filled: u128, sell_filled: u128 },
+    SlowConservation { index: usize, cmd: Command, buy_filled: u128, sell_filled: u128 },
     /// I9: a fresh engine fed the same command log did not reach a
     /// byte-identical digest.
     ReplayMismatch { which: &'static str },
@@ -98,6 +104,22 @@ impl Harness {
         }
         if !self.slow_auditor.violations.is_empty() {
             return Err(Failure::SlowAuditor { index, cmd, violations: self.slow_auditor.violations.clone() });
+        }
+        if !self.fast_auditor.quantity_conserved() {
+            return Err(Failure::FastConservation {
+                index,
+                cmd,
+                buy_filled: self.fast_auditor.buy_filled,
+                sell_filled: self.fast_auditor.sell_filled,
+            });
+        }
+        if !self.slow_auditor.quantity_conserved() {
+            return Err(Failure::SlowConservation {
+                index,
+                cmd,
+                buy_filled: self.slow_auditor.buy_filled,
+                sell_filled: self.slow_auditor.sell_filled,
+            });
         }
 
         Ok(())

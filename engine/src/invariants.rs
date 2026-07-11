@@ -97,7 +97,7 @@ fn check_i7_live_set_integrity(book: &Book, out: &mut Vec<String>) {
                 if !walked.insert(node.id) {
                     out.push(format!("I7: order {} appears twice while walking the {side_name} book", node.id));
                 }
-                match book.live.get(&node.id) {
+                match book.live.get(node.id) {
                     None => out.push(format!("I7: order {} is in the {side_name} book but not in the live index", node.id)),
                     Some(&recorded_handle) => {
                         if recorded_handle != h {
@@ -114,7 +114,7 @@ fn check_i7_live_set_integrity(book: &Book, out: &mut Vec<String>) {
     }
 
     for id in book.live.keys() {
-        if !walked.contains(id) {
+        if !walked.contains(&id) {
             out.push(format!("I7: order {id} is in the live index but not reachable by walking any level"));
         }
     }

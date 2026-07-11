@@ -10,6 +10,7 @@
 //! links against it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use engine::Book;
@@ -74,4 +75,46 @@ fn zero_allocations_across_ten_million_hot_path_commands() {
     let after = ALLOC_COUNT.load(Ordering::SeqCst);
     assert_eq!(after, baseline, "engine allocated {} time(s) across the hot-path burst", after - baseline);
     assert_eq!(book.live_count(), 0);
+
+    // Session-audit extension: phase 1 above always drains the book to
+    // zero between each New/Cancel pair, so `live: HashMap<OrderId,
+    // Handle>` never holds more than one entry at a time. That is exactly
+    // the shape that let F-005 slip past testing: a structure reserved to
+    // a capacity up front, but never actually churned while HELD near
+    // that capacity, which is precisely when hashbrown's tombstone
+    // accounting could force a resize despite occupancy never exceeding
+    // the reservation. This phase holds the live map at capacity - 1 and
+    // sustains churn there, with always-new ids (never reused, so no
+    // DuplicateOrderId noise), for two million cycles: the same
+    // mechanism that broke the retirement ring's membership set, aimed
+    // at a different structure this test had never actually stressed.
+    let near_capacity = cfg.capacity - 1;
+    let mut resting_ids: VecDeque<u64> = VecDeque::with_capacity(near_capacity);
+    let mut next_id = 10_000_000u64;
+
+    for _ in 0..near_capacity {
+        book.apply(Command::New { id: next_id, account: 1, side: Side::Buy, kind: Kind::Limit, price: 100, qty: 1 });
+        resting_ids.push_back(next_id);
+        next_id += 1;
+    }
+    assert_eq!(book.live_count(), near_capacity);
+
+    let phase2_baseline = ALLOC_COUNT.load(Ordering::SeqCst);
+
+    for _ in 0..2_000_000u64 {
+        let oldest = resting_ids.pop_front().expect("near_capacity > 0, so always at least one resting order");
+        book.apply(Command::Cancel { id: oldest });
+        book.apply(Command::New { id: next_id, account: 1, side: Side::Buy, kind: Kind::Limit, price: 100, qty: 1 });
+        resting_ids.push_back(next_id);
+        next_id += 1;
+    }
+
+    let phase2_after = ALLOC_COUNT.load(Ordering::SeqCst);
+    assert_eq!(
+        phase2_after,
+        phase2_baseline,
+        "engine allocated {} time(s) while holding the live map near capacity under sustained churn",
+        phase2_after - phase2_baseline
+    );
+    assert_eq!(book.live_count(), near_capacity);
 }

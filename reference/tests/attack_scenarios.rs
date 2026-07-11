@@ -45,6 +45,29 @@ fn a1_post_only_would_cross() {
     assert_no_violations(&book);
 }
 
+/// Session-audit pin: post-only rejects on ANY cross, even when the only
+/// crossing counterparty is the same account's own resting order.
+/// Deliberately different from A3, where a resting Limit crossed by an
+/// amend has its self-match cancelled and proceeds: Limit is allowed to
+/// take, post-only never is, so the two kinds have different, both
+/// intentional, self-match policies. This is not the same question asked
+/// twice; it pins that post-only's answer does not change just because
+/// the only liquidity in the way happens to be the account's own.
+#[test]
+fn post_only_rejects_even_when_only_crossing_its_own_order() {
+    let mut book = RefBook::new(wide_cfg());
+    book.apply(new_cmd(1, 1, Side::Sell, Kind::Limit, 100, 5)); // resting ask, account 1
+
+    let events = book.apply(new_cmd(2, 1, Side::Buy, Kind::PostOnly, 100, 5)); // same account
+    assert_eq!(rejected_reason(&events, 2), Some(RejectReason::WouldCross), "{events:?}");
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Cancelled { .. } | Event::Fill { .. })),
+        "a rejected post-only must mutate nothing, including the resting order it would have crossed: {events:?}"
+    );
+    assert!(book.is_live(1), "the resting order must still be live and untouched");
+    assert_eq!(book.best_ask(), Some(100));
+}
+
 /// A2: a cancel that races a fill must reject as UnknownOrder, not
 /// cancel whatever now occupies the id's former slot. Also checks the
 /// scenario's own premise -- the cancel's ingress seq is exactly one
@@ -170,6 +193,32 @@ fn a5_market_into_empty_book() {
     assert!(events.iter().any(|e| matches!(e, Event::Accepted { id: 1, .. })));
     assert!(events.contains(&Event::Cancelled { id: 1 }));
     assert!(!events.iter().any(|e| matches!(e, Event::Fill { .. } | Event::Rejected { .. })));
+
+    assert_no_violations(&book);
+}
+
+/// Session-audit pin: a Market order's price field is ignored, not
+/// validated, by design (Market has no limit, so the band check that
+/// applies to every other kind is explicitly skipped for it). This pins
+/// that decision with genuinely wild values, both below and above the
+/// band, rather than leaving it implied by the absence of a
+/// PriceOutOfBand test for Market. Confirmed by inspection this value is
+/// never used as a map key or array index (Market never rests, so
+/// `rest()` is never reached for it): this test pins the behavior, not
+/// the safety argument, which is a separate, already-verified claim.
+#[test]
+fn market_order_price_is_ignored_not_validated() {
+    let mut book = RefBook::new(wide_cfg());
+    book.apply(new_cmd(1, 1, Side::Sell, Kind::Limit, 100, 5));
+
+    let below_band = book.apply(new_cmd(2, 2, Side::Buy, Kind::Market, i64::MIN, 5));
+    assert!(below_band.iter().any(|e| matches!(e, Event::Accepted { id: 2, .. })), "{below_band:?}");
+    assert!(below_band.iter().any(|e| matches!(e, Event::Fill { maker: 1, taker: 2, price: 100, qty: 5 })), "{below_band:?}");
+
+    book.apply(new_cmd(3, 1, Side::Sell, Kind::Limit, 100, 5));
+    let above_band = book.apply(new_cmd(4, 2, Side::Buy, Kind::Market, i64::MAX, 5));
+    assert!(above_band.iter().any(|e| matches!(e, Event::Accepted { id: 4, .. })), "{above_band:?}");
+    assert!(above_band.iter().any(|e| matches!(e, Event::Fill { maker: 3, taker: 4, price: 100, qty: 5 })), "{above_band:?}");
 
     assert_no_violations(&book);
 }

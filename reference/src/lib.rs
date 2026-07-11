@@ -330,6 +330,16 @@ impl RefBook {
         events
     }
 
+    /// Deliberately account-blind: post-only rejects on ANY cross,
+    /// including a cross whose only counterparty is the same account's
+    /// own resting order. This is not an oversight and there is no
+    /// self-match carve-out to add. Rejection is the conservative choice
+    /// for post-only specifically (it exists to guarantee an order never
+    /// becomes a taker, full stop), unlike a resting Limit order crossed
+    /// by an amend, which is allowed to take and has its self-match
+    /// handled by CancelResting instead (see `handle_amend`). Those are
+    /// two different kinds with two different, both intentional,
+    /// self-match policies, not one inconsistent answer to one question.
     fn would_cross(&self, side: Side, price: Price) -> bool {
         match side {
             Side::Buy => self.best_ask().is_some_and(|ask| ask <= price),

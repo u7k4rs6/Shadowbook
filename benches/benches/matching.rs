@@ -6,9 +6,9 @@
 //! percentiles from a full latency histogram, not a mean-centered
 //! statistical estimate of one operation's typical cost, which is a
 //! different kind of measurement than criterion's own harness produces.
-//! `criterion::black_box` still does the one job criterion is used for
-//! here: stopping the compiler from optimizing away work whose result is
-//! never read.
+//! `std::hint::black_box` still does the one job a benchmark harness
+//! needs here: stopping the compiler from optimizing away work whose
+//! result is never read.
 //!
 //! Methodology: timestamps are read with `Instant::now()` into a
 //! preallocated `Vec<u64>` of raw nanoseconds; the histogram is built
@@ -17,6 +17,8 @@
 //! p99.99, max. Never a mean: a mean is the average of the orders that
 //! filled cleanly and the orders that would have blown a risk limit, and
 //! averaging them together produces a number no order ever experienced.
+
+#![forbid(unsafe_code)]
 
 use std::hint::black_box;
 use std::time::Instant;
