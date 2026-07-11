@@ -8,3 +8,11 @@ publish = false
 types = { path = "../types" }
 reference = { path = "../reference" }
 engine = { path = "../engine" }
+rand = "0.8"
+
+[dev-dependencies]
+proptest = "1"
+
+[[bin]]
+name = "seeded_runner"
+path = "src/bin/seeded_runner.rs"

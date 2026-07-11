@@ -95,7 +95,7 @@ pub const DEFAULT_CONFIG: Config = Config { n_ticks: 256, capacity: 64, id_retir
 /// different, much slower, instrument.
 pub const BENCH_CONFIG: Config = Config { n_ticks: 65536, capacity: 65536, id_retirement_window: 262_144 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RejectReason {
     UnknownOrder,
     DuplicateId,
@@ -309,6 +309,13 @@ impl RetirementRing {
 
     pub fn contains(&self, id: OrderId) -> bool {
         self.members.contains(id)
+    }
+
+    /// Currently-retired ids, oldest first. For the fuzz generator, which
+    /// needs to pick a random retired id to deliberately target the
+    /// reused-id (`DuplicateOrderId`) scenario.
+    pub fn iter(&self) -> impl Iterator<Item = OrderId> + '_ {
+        self.order.iter().copied()
     }
 
     /// Retire `id`, evicting the oldest entry first if the ring is

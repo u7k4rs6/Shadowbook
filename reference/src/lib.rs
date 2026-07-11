@@ -45,13 +45,36 @@ pub struct Order {
     pub seq: Seq,
 }
 
-/// `#[derive(Clone)]` here is deliberately total: it clones every field,
-/// including `live` and `next_seq`, not just `bids`/`asks`. A partial
-/// clone -- forgetting `live`, say -- would give `compute_fillable`'s
-/// shadow book a different account/liveness picture than the real book,
-/// which is A4 reappearing inside the exact mechanism built to prevent
-/// A4. See `clone_is_total_and_independent` in the test suite.
-#[derive(Debug, Clone)]
+/// A read-only snapshot of one resting order's public-facing attributes.
+/// See `RefBook::resting_orders`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestingOrderView {
+    pub id: OrderId,
+    pub side: Side,
+    pub kind: Kind,
+    pub price: Price,
+    pub remaining: Qty,
+}
+
+/// `Clone` (implemented manually below, not derived) is deliberately
+/// total for every field that bears on matching semantics: `bids`,
+/// `asks`, `live`, `retirement`, `next_seq`, `cfg`. A partial clone --
+/// forgetting `live`, say -- would give `compute_fillable`'s shadow book
+/// a different account/liveness picture than the real book, which is A4
+/// reappearing inside the exact mechanism built to prevent A4. See
+/// `clone_is_total_and_independent` in the test suite.
+///
+/// `log` is the one field deliberately excluded from that totality.
+/// `compute_fillable`'s shadow clone never reads it -- nothing about
+/// matching depends on command history -- and cloning it anyway made
+/// every FOK order cost O(commands applied so far), because `log` grows
+/// for the life of the book. Under sustained fuzzing that turned a run
+/// quadratic overall: caught by the seeded runner degrading from 265K
+/// ops/sec at 10K commands to 16K ops/sec at 1M, a slowdown with no
+/// other explanation at a book whose live-order count stays bounded by
+/// `Config::capacity` throughout. A clone used once and discarded should
+/// not carry the entire run's history with it.
+#[derive(Debug)]
 pub struct RefBook {
     cfg: Config,
     pub(crate) bids: BTreeMap<Reverse<Price>, VecDeque<Order>>,
@@ -60,6 +83,20 @@ pub struct RefBook {
     retirement: RetirementRing,
     next_seq: Seq,
     log: Vec<Command>,
+}
+
+impl Clone for RefBook {
+    fn clone(&self) -> Self {
+        RefBook {
+            cfg: self.cfg,
+            bids: self.bids.clone(),
+            asks: self.asks.clone(),
+            live: self.live.clone(),
+            retirement: self.retirement.clone(),
+            next_seq: self.next_seq,
+            log: Vec::new(),
+        }
+    }
 }
 
 impl RefBook {
@@ -104,6 +141,40 @@ impl RefBook {
 
     pub fn command_log(&self) -> &[Command] {
         &self.log
+    }
+
+    /// Drops the accumulated command log, freeing its backing memory.
+    /// For a book kept only as a throwaway model (the fuzz generator's
+    /// shadow book, never replayed or introspected via `command_log`),
+    /// calling this after every command keeps the log from accumulating
+    /// at all across a long run -- there is no reason to hold a growing
+    /// history nothing will ever read.
+    pub fn clear_log(&mut self) {
+        self.log.clear();
+        self.log.shrink_to_fit();
+    }
+
+    /// A snapshot of every currently resting order's public-facing
+    /// attributes, for the fuzz generator to inspect without exposing
+    /// `RefBook`'s internal `BTreeMap`/`VecDeque` representation. This is
+    /// what makes the generator's liveness model exact by construction:
+    /// it asks the shadow book what is actually live right now, rather
+    /// than re-deriving that answer from a running tally of past events
+    /// that could drift from the truth (the F-001/F-003 failure shape).
+    pub fn resting_orders(&self) -> Vec<RestingOrderView> {
+        self.bids
+            .values()
+            .flat_map(|d| d.iter())
+            .chain(self.asks.values().flat_map(|d| d.iter()))
+            .map(|o| RestingOrderView { id: o.id, side: o.side, kind: o.kind, price: o.price, remaining: o.remaining })
+            .collect()
+    }
+
+    /// Currently-retired ids (recently live, now gone), for the generator
+    /// to deliberately target the reused-id scenario. Same
+    /// exact-by-construction rationale as `resting_orders`.
+    pub fn retired_ids(&self) -> Vec<OrderId> {
+        self.retirement.iter().collect()
     }
 
     /// A stable hash of the full book, walked in canonical priority order
