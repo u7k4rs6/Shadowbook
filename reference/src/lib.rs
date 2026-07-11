@@ -20,7 +20,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
-use types::{AccountId, Command, Config, Event, Kind, OrderId, Price, Qty, RejectReason, Seq, Side};
+use types::{AccountId, Command, Config, Event, Kind, OrderId, Price, Qty, RejectReason, RetirementRing, Seq, Side};
 
 /// `price * quantity`, widened to `i128` before multiplication per
 /// architecture section 2. Nothing in the current order-matching path
@@ -57,6 +57,7 @@ pub struct RefBook {
     pub(crate) bids: BTreeMap<Reverse<Price>, VecDeque<Order>>,
     pub(crate) asks: BTreeMap<Price, VecDeque<Order>>,
     pub(crate) live: HashMap<OrderId, Side>,
+    retirement: RetirementRing,
     next_seq: Seq,
     log: Vec<Command>,
 }
@@ -68,9 +69,17 @@ impl RefBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             live: HashMap::new(),
+            retirement: RetirementRing::new(cfg.id_retirement_window),
             next_seq: 0,
             log: Vec::new(),
         }
+    }
+
+    /// Simple `live.len() >= capacity` check: the reference engine's index
+    /// holds only resting orders, so this is the entire arena-capacity
+    /// story here. `engine` mirrors this with its own free-slot count.
+    fn arena_full(&self) -> bool {
+        self.live.len() >= self.cfg.capacity
     }
 
     pub fn config(&self) -> Config {
@@ -173,9 +182,27 @@ impl RefBook {
             events.push(Event::Rejected { id, reason: RejectReason::DuplicateId, seq });
             return events;
         }
+        // Not live right now, but retired too recently: the ABA guard
+        // from F-001. Distinct from DuplicateId (checked above) because
+        // the failure shape is different -- this id *was* live and is
+        // gone, not currently in use.
+        if self.retirement.contains(id) {
+            events.push(Event::Rejected { id, reason: RejectReason::DuplicateOrderId, seq });
+            return events;
+        }
         // Market orders carry no meaningful price; the band does not apply.
         if kind != Kind::Market && !self.cfg.contains(price) {
             events.push(Event::Rejected { id, reason: RejectReason::PriceOutOfBand, seq });
+            return events;
+        }
+        // Checked at ingress, before matching, before any mutation: a
+        // marketable order that would have fully filled without ever
+        // resting is still rejected here if the arena is full. This is
+        // the only point where "mutate nothing" is still achievable --
+        // once fills have been emitted there is no honest event left to
+        // send for a reject. See Config::capacity.
+        if self.arena_full() {
+            events.push(Event::Rejected { id, reason: RejectReason::ArenaFull, seq });
             return events;
         }
 
@@ -203,6 +230,13 @@ impl RefBook {
         let remaining = self.run_match(order.id, order.account, order.side, limit_price, order.remaining, &mut events);
         order.remaining = remaining;
 
+        // An order that ends up resting stays live; retirement does not
+        // apply to it yet. Every other path here used the id without it
+        // becoming a durable resting order, so the id retires now: a late
+        // Cancel/Amend/New naming it must not silently land on whatever
+        // New later reuses the id.
+        let ends_up_resting = remaining > 0 && matches!(kind, Kind::Limit | Kind::PostOnly);
+
         if remaining > 0 {
             match kind {
                 Kind::Limit | Kind::PostOnly => self.rest(order),
@@ -216,6 +250,10 @@ impl RefBook {
                     events.push(Event::Cancelled { id });
                 }
             }
+        }
+
+        if !ends_up_resting {
+            self.retirement.retire(id);
         }
 
         events
@@ -307,6 +345,7 @@ impl RefBook {
                 // continues at the same level/price.
                 let cancelled = self.level_mut(resting_side, price).pop_front().unwrap();
                 self.live.remove(&cancelled.id);
+                self.retirement.retire(cancelled.id);
                 self.drop_level_if_empty(resting_side, price);
                 events.push(Event::Cancelled { id: cancelled.id });
                 continue;
@@ -336,6 +375,7 @@ impl RefBook {
             if maker_done {
                 let done = self.level_mut(resting_side, price).pop_front().unwrap();
                 self.live.remove(&done.id);
+                self.retirement.retire(done.id);
             }
             self.drop_level_if_empty(resting_side, price);
         }
@@ -375,6 +415,7 @@ impl RefBook {
         };
         self.remove_order(side, id);
         self.live.remove(&id);
+        self.retirement.retire(id);
         events.push(Event::Cancelled { id });
         events
     }
@@ -460,6 +501,11 @@ impl RefBook {
 
         if remaining > 0 {
             self.rest(removed);
+        } else {
+            // Fully consumed by its own re-match: the id is no longer
+            // live and was never re-inserted, so it retires here just as
+            // it would from handle_new's non-resting path.
+            self.retirement.retire(id);
         }
 
         events

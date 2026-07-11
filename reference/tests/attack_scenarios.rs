@@ -181,7 +181,7 @@ fn a5_market_into_empty_book() {
 /// check alone would never catch it.
 #[test]
 fn a6_notional_overflow_widens_to_i128() {
-    let price: i64 = DEFAULT_CONFIG.tick_max;
+    let price: i64 = DEFAULT_CONFIG.tick_max();
     let qty: u64 = u64::MAX;
 
     let notional = reference::notional(price, qty);
@@ -264,28 +264,27 @@ fn a9_full_sweep_and_rebuild() {
 }
 
 /// A10: orders at exactly the band edges accept; one tick outside on
-/// either side rejects. Band is pinned to `[0, N_TICKS - 1]` = `[0,
-/// 65535]`, absolute ticks, no offset arithmetic -- so this test also
-/// pins the low edge at zero rather than some arbitrary negative number,
-/// keeping the usize-underflow-adjacent edge reachable for the engine
-/// crate later.
+/// either side rejects. Band is pinned to `[0, n_ticks - 1]`, absolute
+/// ticks, no offset arithmetic -- so this test also pins the low edge at
+/// zero rather than some arbitrary negative number, keeping the
+/// usize-underflow-adjacent edge reachable for the engine crate later.
 #[test]
 fn a10_price_band_boundary() {
-    assert_eq!(DEFAULT_CONFIG.tick_min, 0);
-    assert_eq!(DEFAULT_CONFIG.tick_max, (types::N_TICKS as i64) - 1);
+    assert_eq!(DEFAULT_CONFIG.tick_max(), (DEFAULT_CONFIG.n_ticks as i64) - 1);
 
     let mut book = RefBook::new(DEFAULT_CONFIG);
+    let max_tick = DEFAULT_CONFIG.tick_max();
 
     let at_min = book.apply(new_cmd(1, 1, Side::Buy, Kind::Limit, 0, 1));
     assert!(at_min.iter().any(|e| matches!(e, Event::Accepted { .. })), "{at_min:?}");
 
-    let at_max = book.apply(new_cmd(2, 1, Side::Sell, Kind::Limit, 65535, 1));
+    let at_max = book.apply(new_cmd(2, 1, Side::Sell, Kind::Limit, max_tick, 1));
     assert!(at_max.iter().any(|e| matches!(e, Event::Accepted { .. })), "{at_max:?}");
 
     let below_min = book.apply(new_cmd(3, 1, Side::Buy, Kind::Limit, -1, 1));
     assert_eq!(rejected_reason(&below_min, 3), Some(RejectReason::PriceOutOfBand), "{below_min:?}");
 
-    let above_max = book.apply(new_cmd(4, 1, Side::Sell, Kind::Limit, 65536, 1));
+    let above_max = book.apply(new_cmd(4, 1, Side::Sell, Kind::Limit, max_tick + 1, 1));
     assert_eq!(rejected_reason(&above_max, 4), Some(RejectReason::PriceOutOfBand), "{above_max:?}");
 
     assert_no_violations(&book);
@@ -397,6 +396,83 @@ fn new_and_amend_reject_zero_quantity() {
     let amend_zero = book.apply(Command::Amend { id: 2, new_price: 100, new_qty: 0 });
     assert_eq!(rejected_reason(&amend_zero, 2), Some(RejectReason::InvalidQuantity), "{amend_zero:?}");
     assert!(book.is_live(2), "rejected amend must leave the resting order live");
+
+    assert_no_violations(&book);
+}
+
+/// Session 2: arena capacity is enforced at New ingress, before matching,
+/// before any mutation. Filling the arena to `DEFAULT_CONFIG.capacity`
+/// rejects the next New as ArenaFull, live count never exceeds capacity,
+/// and -- the conservative rule the spec calls out explicitly -- a
+/// marketable order that would have fully filled without ever resting is
+/// still rejected when the arena is full, because the check happens
+/// before matching even runs.
+#[test]
+fn arena_full_rejects_new_and_mutates_nothing() {
+    let mut book = RefBook::new(wide_cfg());
+    let capacity = wide_cfg().capacity;
+
+    for id in 1..=capacity as u64 {
+        let events = book.apply(new_cmd(id, 1, Side::Buy, Kind::Limit, 100, 1));
+        assert!(events.iter().any(|e| matches!(e, Event::Accepted { .. })), "order {id} should have rested: {events:?}");
+    }
+    assert_eq!(book.live_count(), capacity);
+
+    // One more New, of a kind that would fully fill against nothing (a
+    // Market order against an empty opposing side would normally emit
+    // Cancelled with zero fills) -- but the arena is full, so it must be
+    // rejected before matching is even attempted, not silently allowed
+    // through because it "needed no slot."
+    let over = book.apply(new_cmd(999, 2, Side::Sell, Kind::Market, 0, 1));
+    assert_eq!(rejected_reason(&over, 999), Some(RejectReason::ArenaFull), "{over:?}");
+    assert!(
+        !over.iter().any(|e| matches!(e, Event::Fill { .. } | Event::Cancelled { .. } | Event::Accepted { .. })),
+        "a rejected New must mutate nothing: {over:?}"
+    );
+    assert_eq!(book.live_count(), capacity, "rejected New must not touch live count");
+
+    // Freeing one slot must let exactly one more New through.
+    book.apply(Command::Cancel { id: 1 });
+    assert_eq!(book.live_count(), capacity - 1);
+    let now_fits = book.apply(new_cmd(1000, 3, Side::Buy, Kind::Limit, 100, 1));
+    assert!(now_fits.iter().any(|e| matches!(e, Event::Accepted { .. })), "{now_fits:?}");
+
+    assert_no_violations(&book);
+}
+
+/// Session 2: an id that stops being live -- by cancel, by filling to
+/// completion, or by never resting at all -- retires into a bounded
+/// window and cannot be reused by a New until it ages out of that window.
+/// This is the F-001 ABA guard: distinct from DuplicateId (id currently
+/// live), which is unaffected by this test.
+#[test]
+fn duplicate_order_id_rejects_reuse_within_window_then_allows_after_eviction() {
+    let mut book = RefBook::new(wide_cfg());
+    let window = wide_cfg().id_retirement_window;
+
+    book.apply(new_cmd(1, 1, Side::Buy, Kind::Limit, 100, 1));
+    book.apply(Command::Cancel { id: 1 });
+    assert!(!book.is_live(1));
+
+    // Immediate reuse, still inside the window: rejected, not silently
+    // accepted as a fresh order under someone else's old identity.
+    let reused = book.apply(new_cmd(1, 2, Side::Sell, Kind::Limit, 100, 1));
+    assert_eq!(rejected_reason(&reused, 1), Some(RejectReason::DuplicateOrderId), "{reused:?}");
+    assert!(!book.is_live(1));
+
+    // Retire `window` more distinct ids (New immediately Cancelled, using
+    // ids far outside the interesting range) to age id 1 out of the ring
+    // by eviction.
+    for id in 10_000..10_000 + window as u64 {
+        book.apply(new_cmd(id, 1, Side::Buy, Kind::Limit, 100, 1));
+        book.apply(Command::Cancel { id });
+    }
+
+    let reused_after_eviction = book.apply(new_cmd(1, 2, Side::Sell, Kind::Limit, 100, 1));
+    assert!(
+        reused_after_eviction.iter().any(|e| matches!(e, Event::Accepted { .. })),
+        "id 1 should be reusable once it ages out of the retirement window: {reused_after_eviction:?}"
+    );
 
     assert_no_violations(&book);
 }
