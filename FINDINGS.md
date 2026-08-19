@@ -10,6 +10,28 @@ The reference engine carries no zero-allocation claim, and is free to reach for 
 
 The two engines exist so that one can shadow the other. Every finding below is the same discovery in a different costume: the interesting failures were never really in the engine being checked, they were in the machinery doing the checking, or in a cost nobody had measured yet.
 
+## Machine
+
+Every timing figure in this report -- the benchmark percentiles quoted in F-004, the
+throughput and elapsed figures in F-006, and the wall clock of the differential run
+below -- was measured on:
+
+| | |
+|---|---|
+| CPU | Intel Core i5-12450HX, 8 cores / 12 threads, 800-4400 MHz |
+| RAM | 10 GiB |
+| OS | Ubuntu 26.04 LTS, Linux 7.0.0-29-generic |
+| Toolchain | rustc 1.95.0 (59807616e 2026-04-14), release profile |
+
+No CPU pinning, no governor control, no attempt to quiet the machine: the stock
+`powersave` governor, SMT enabled, turbo left entirely to the kernel, and an ordinary
+interactive desktop session running alongside. Every one of these numbers moves with
+the hardware and its load, and none of them is promised on anyone else's machine. The
+counts are a different matter: operation totals, acceptance breakdowns, rejection
+counts and divergence counts are seed-deterministic and reproduce exactly anywhere.
+Where this report gives a count, it is a fact about the run; where it gives a duration
+or a percentile, it is a fact about this machine on the day it ran.
+
 ## The unifying thesis
 
 Every finding in this report is an instance of the same shape: an unvalidated model of state, owned by something other than the component under test.
@@ -64,7 +86,9 @@ The 100,000,000-operation run is the evidence this worked. Cancel succeeded 13,9
 
 The retirement window's membership check needs to answer whether an id is in the window without allocating in the hot path, which is why it is a fixed-capacity structure rather than a bare scan. At fuzz scale, a 32-entry window, the difference between a constant-time lookup and a linear scan is invisible: both are fast enough that nothing measures the gap. At production scale it is not.
 
-Measured directly on this build, both under the same sustained-load methodology described in the benchmark: with the real, fixed-capacity membership check, `insert_no_cross` reports p50 386 nanoseconds and p99 667 nanoseconds. Swapping only that membership check for a bare linear scan of the same window, with nothing else changed, moves those same percentiles to p50 43,711 nanoseconds and p99 60,767 nanoseconds, roughly two orders of magnitude slower, at the exact window size a production-scale book actually runs with. The naive version was never in the committed engine; this comparison exists specifically to make its avoided cost real and visible for this build, rather than trusted on faith.
+Measured directly on this build, both under the same sustained-load methodology described in the benchmark: with the real, fixed-capacity membership check, `insert_no_cross` reported p50 386 nanoseconds and p99 667 nanoseconds. Swapping only that membership check for a bare linear scan of the same window, with nothing else changed, moves those same percentiles to p50 43,711 nanoseconds and p99 60,767 nanoseconds, roughly two orders of magnitude slower, at the exact window size a production-scale book actually runs with. The naive version was never in the committed engine; this comparison exists specifically to make its avoided cost real and visible for this build, rather than trusted on faith.
+
+Both halves of that pair come from one earlier session on the machine named in BENCH.md, and are left at their original values there and here. The naive membership check was deleted after being measured, so only the committed half can be regenerated: `cargo bench -p benches` re-measures it today at a median p50 of 416 nanoseconds and a median p99 of 758 nanoseconds across seven runs (p50 ranging 385-424, p99 ranging 707-871). The few tens of nanoseconds between the two committed readings are run-to-run variance on one machine; the two-orders-of-magnitude gap being demonstrated is not.
 
 ### F-005: a bounded standard hash collection is not a bounded table, and this was found twice
 
