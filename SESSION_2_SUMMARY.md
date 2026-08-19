@@ -1,5 +1,11 @@
 # Session 2: corrections, mutation calibration, event auditor
 
+> **Historical session log.** This file records the state of the build at the end of
+> one working session and is not maintained against the current tree. Numbers,
+> counts and "what's still true" notes below were accurate when written and have
+> since moved on. For the current state see [`FINDINGS.md`](FINDINGS.md),
+> [`BENCH.md`](BENCH.md) and [`ERRATA.md`](ERRATA.md).
+
 ## Corrections applied (items 1-6 from the review)
 
 1. **Event ordering pinned.** `Amended` is emitted before any `Fill`/`Cancelled`
@@ -126,3 +132,11 @@ code rather than something each handler has to remember to do correctly.
 `engine/` and `fuzz/` remain untouched placeholder crates. Full workspace
 build is warning-free; `cargo test --workspace` is green (14 tests in
 `reference`, `types`/`engine`/`fuzz` have none yet).
+
+That count is this session's, and is left as written rather than updated: it
+describes a tree in which `engine/` and `fuzz/` contained no logic at all. It is
+not a claim about the repository as it stands. `cargo test --workspace` on the
+current tree runs **38** tests: 19 in `reference`, 15 in `engine` (14 attack
+scenarios plus one unit test in `src/lib.rs`), the zero-allocation test, and three
+in `fuzz` (arena saturation, the non-differential notional test, and the proptest
+runner).

@@ -77,17 +77,20 @@ fn zero_allocations_across_ten_million_hot_path_commands() {
     assert_eq!(book.live_count(), 0);
 
     // Session-audit extension: phase 1 above always drains the book to
-    // zero between each New/Cancel pair, so `live: HashMap<OrderId,
-    // Handle>` never holds more than one entry at a time. That is exactly
-    // the shape that let F-005 slip past testing: a structure reserved to
-    // a capacity up front, but never actually churned while HELD near
-    // that capacity, which is precisely when hashbrown's tombstone
-    // accounting could force a resize despite occupancy never exceeding
-    // the reservation. This phase holds the live map at capacity - 1 and
-    // sustains churn there, with always-new ids (never reused, so no
-    // DuplicateOrderId noise), for two million cycles: the same
-    // mechanism that broke the retirement ring's membership set, aimed
-    // at a different structure this test had never actually stressed.
+    // zero between each New/Cancel pair, so `live` never holds more than
+    // one entry at a time. That is exactly the shape that let F-005 slip
+    // past testing: a structure reserved to a capacity up front, but
+    // never actually churned while HELD near that capacity, which is
+    // precisely when a standard hash map's tombstone accounting could
+    // force a resize despite occupancy never exceeding the reservation.
+    // `live` was a `HashMap<OrderId, Handle>` when this phase was written
+    // and was what it caught; it is a `FixedIdMap<Handle>` now, and this
+    // phase is what holds it that way. It holds the live map at
+    // capacity - 1 and sustains churn there, with always-new ids (never
+    // reused, so no DuplicateOrderId noise), for two million cycles: the
+    // same mechanism that broke the retirement ring's membership set,
+    // aimed at a different structure this test had never actually
+    // stressed.
     let near_capacity = cfg.capacity - 1;
     let mut resting_ids: VecDeque<u64> = VecDeque::with_capacity(near_capacity);
     let mut next_id = 10_000_000u64;

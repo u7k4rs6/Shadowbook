@@ -1,5 +1,11 @@
 # Session 1: reference engine and harness
 
+> **Historical session log.** This file records the state of the build at the end of
+> one working session and is not maintained against the current tree. Numbers,
+> counts and "what's still true" notes below were accurate when written and have
+> since moved on. For the current state see [`FINDINGS.md`](FINDINGS.md),
+> [`BENCH.md`](BENCH.md) and [`ERRATA.md`](ERRATA.md).
+
 ## What was built
 
 - Cargo workspace: `types`, `reference`, `engine` (stub), `fuzz` (stub), `benches/` (placeholder dir).
