@@ -107,6 +107,7 @@ shadowbook/
 │   └── levels.rs   65,536-tick price band, bitmap-summarized
 ├── fuzz/           differential harness + auditor
 ├── benches/        hdrhistogram + Instant, harness = false
+├── tools/          build_assets.py, which generates assets/
 ├── FINDINGS.md     what the fuzzer found, including its own bugs
 ├── BENCH.md        methodology and raw distributions
 └── ERRATA.md       claims I corrected after making them
