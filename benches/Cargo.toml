@@ -8,7 +8,6 @@ publish = false
 types = { path = "../types" }
 engine = { path = "../engine" }
 hdrhistogram = "7"
-criterion = "0.5"
 
 [[bench]]
 name = "matching"

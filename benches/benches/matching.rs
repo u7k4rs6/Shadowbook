@@ -1,19 +1,23 @@
 //! Tail latency for `insert_no_cross`, `cancel_deep`, and
 //! `sweep_five_levels`, at production scale (`types::BENCH_CONFIG`:
 //! 65536 ticks, 65536-order arena), under sustained quote stuffing, not
-//! a quiet book. `harness = false`: this is a plain binary, not a
-//! criterion-statistics benchmark, because the reported numbers are tail
-//! percentiles from a full latency histogram, not a mean-centered
-//! statistical estimate of one operation's typical cost, which is a
-//! different kind of measurement than criterion's own harness produces.
+//! a quiet book. `harness = false`: this is a plain binary with its own
+//! `main`, not a statistical bench harness, because the reported numbers
+//! are tail percentiles from a full latency histogram, not a
+//! mean-centered statistical estimate of one operation's typical cost.
+//! There is no benchmarking framework involved at all -- timing is
+//! `std::time::Instant`, the histogram is `hdrhistogram` -- which is why
+//! no such crate is a dependency of this one.
 //! `std::hint::black_box` still does the one job a benchmark harness
 //! needs here: stopping the compiler from optimizing away work whose
 //! result is never read.
 //!
-//! Methodology: timestamps are read with `Instant::now()` into a
-//! preallocated `Vec<u64>` of raw nanoseconds; the histogram is built
-//! from that vector after the run, never computed inside the measured
-//! path. Warmup of 10^6 commands, discarded. Reported: p50, p99, p99.9,
+//! Methodology: each sample is one `Instant::now()` / `Instant::elapsed`
+//! pair around a single `Book::apply`, and nothing else is inside the
+//! timed region -- the `Histogram::record` call that files the sample
+//! happens after `elapsed()` has already been read, so histogram
+//! bookkeeping is never part of what is measured. Warmup of 10^6
+//! commands, discarded. Reported: p50, p99, p99.9,
 //! p99.99, max. Never a mean: a mean is the average of the orders that
 //! filled cleanly and the orders that would have blown a risk limit, and
 //! averaging them together produces a number no order ever experienced.
